@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Air Canvas Studio</title>
+    
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- MediaPipe Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: sans-serif; }
+        canvas { display: block; position: absolute; top: 0; left: 0; z-index: 10; }
+        #video-container {
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+            overflow: hidden; z-index: 5; background: #000;
+            transform: scaleX(-1); /* Mirror video preview */
+        }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        
+        #ui-panel {
+            position: absolute; top: 20px; left: 20px; z-index: 20;
+            background: rgba(30, 30, 30, 0.8); backdrop-filter: blur(10px);
+            padding: 20px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.1);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            display: flex; flex-direction: column; gap: 15px; width: 250px;
+        }
+
+        .control-group { display: flex; flex-direction: column; gap: 5px; }
+        .control-group label { font-size: 0.85rem; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
+        
+        input[type="color"] {
+            -webkit-appearance: none; border: none; width: 100%; height: 40px;
+            border-radius: 8px; cursor: pointer; padding: 0;
+        }
+        input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+        input[type="color"]::-webkit-color-swatch { border: none; border-radius: 8px; }
+
+        input[type="range"] {
+            -webkit-appearance: none; width: 100%; background: transparent;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; height: 16px; width: 16px; border-radius: 50%;
+            background: #fff; cursor: pointer; margin-top: -6px; box-shadow: 0 0 5px rgba(0,0,0,0.5);
+        }
+        input[type="range"]::-webkit-slider-runnable-track {
+            width: 100%; height: 4px; cursor: pointer; background: #444; border-radius: 2px;
+        }
+
+        #status-indicator {
+            padding: 8px 12px; border-radius: 8px; font-weight: bold; text-align: center;
+            background: #333; transition: all 0.2s; letter-spacing: 1px;
+        }
+
+        .btn {
+            background: #444; color: white; border: none; padding: 10px; border-radius: 8px;
+            cursor: pointer; transition: background 0.2s; font-weight: 600;
+        }
+        .btn:hover { background: #555; }
+        .btn-danger { background: #ef4444; }
+        .btn-danger:hover { background: #dc2626; }
+
+        #loading {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: #111; z-index: 100; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 20px;
+        }
+        .loader {
+            border: 4px solid #333; border-top: 4px solid #fff; border-radius: 50%;
+            width: 40px; height: 40px; animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+    <!-- Loading Screen -->
+    <div id="loading">
+        <div class="loader"></div>
+        <h2 class="text-xl font-bold tracking-wider">Loading AI Hand Tracking...</h2>
+        <p class="text-gray-400">Please allow camera access.</p>
+    </div>
+
+    <!-- UI Panel -->
+    <div id="ui-panel">
+        <div>
+            <h1 class="text-xl font-bold text-white mb-1">Air Canvas</h1>
+            <p class="text-xs text-gray-400">Draw with your hands in thin air.</p>
+        </div>
+
+        <div id="status-indicator">Initializing...</div>
+
+        <div class="control-group">
+            <label>Brush Color</label>
+            <input type="color" id="color-picker" value="#3b82f6">
+        </div>
+
+        <div class="control-group">
+            <label>Brush Size (<span id="size-val">5</span>px)</label>
+            <input type="range" id="size-slider" min="2" max="40" value="5">
+        </div>
+
+        <div class="control-group">
+            <label>Active Hand</label>
+            <select id="hand-selector" style="background: #333; color: white; padding: 8px; border-radius: 8px; border: none; outline: none; cursor: pointer;">
+                <option value="Right">Right Hand Only</option>
+                <option value="Left">Left Hand Only</option>
+                <option value="Both">Both Hands</option>
+            </select>
+        </div>
+
+        <div class="text-xs text-gray-400 mt-2 space-y-1 bg-black/30 p-2 rounded">
+            <p>☝️ <b>1 Finger:</b> Draw</p>
+            <p>✌️ <b>2 Fingers:</b> Move Object</p>
+            <p>🤟 <b>3 Fingers:</b> Select Objects</p>
+            <p>🖐️ <b>5 Fingers:</b> Erase</p>
+        </div>
+
+        <button class="btn btn-danger mt-2" onclick="clearCanvas()">Clear All</button>
+        <button class="btn" onclick="clearSelection()">Deselect All</button>
+    </div>
+
+    <!-- Video & Canvas -->
+    <div id="video-container">
+        <video id="input_video" autoplay playsinline></video>
+    </div>
+    <canvas id="output_canvas"></canvas>
+
+    <script>
+        // --- Math Helpers for Collision Detection ---
+        function sqr(x) { return x * x }
+        function dist2(v, w) { return sqr(v.x - w.x) + sqr(v.y - w.y) }
+        function distToSegmentSquared(p, v, w) {
+            let l2 = dist2(v, w);
+            if (l2 === 0) return dist2(p, v);
+            let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+            t = Math.max(0, Math.min(1, t));
+            return dist2(p, { x: v.x + t * (w.x - v.x), y: v.y + t * (w.y - v.y) });
+        }
+        function distToSegment(p, v, w) { return Math.sqrt(distToSegmentSquared(p, v, w)); }
+
+        // --- Classes ---
+        class Stroke {
+            constructor(color, size) {
+                this.points = [];
+                this.color = color;
+                this.size = size;
+                this.selected = false;
+                this.id = Math.random().toString(36).substr(2, 9);
+            }
+
+            addPoint(x, y) {
+                this.points.push({x, y});
+            }
+
+            move(dx, dy) {
+                this.points.forEach(p => {
+                    p.x += dx;
+                    p.y += dy;
+                });
+            }
+
+            draw(ctx) {
+                if (this.points.length < 2) return;
+                
+                ctx.beginPath();
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.lineWidth = this.size;
+
+                if (this.selected) {
+                    ctx.strokeStyle = '#22c55e'; // Green highlight for selection
+                    ctx.shadowColor = '#22c55e';
+                    ctx.shadowBlur = 10;
+                    ctx.lineWidth = this.size + 2;
+                } else {
+                    ctx.strokeStyle = this.color;
+                    ctx.shadowBlur = 0;
+                }
+
+                ctx.moveTo(this.points[0].x, this.points[0].y);
+                for (let i = 1; i < this.points.length; i++) {
+                    ctx.lineTo(this.points[i].x, this.points[i].y);
+                }
+                ctx.stroke();
+                ctx.shadowBlur = 0; // reset
+            }
+
+            intersectsCircle(cx, cy, radius) {
+                if (this.points.length === 0) return false;
+                if (this.points.length === 1) {
+                    return Math.sqrt(dist2({x:cx, y:cy}, this.points[0])) <= radius;
+                }
+                for (let i = 0; i < this.points.length - 1; i++) {
+                    let dist = distToSegment({x: cx, y: cy}, this.points[i], this.points[i+1]);
+                    if (dist <= radius + (this.size/2)) return true;
+                }
+                return false;
+            }
+        }
+
+        // --- Global State ---
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusEl = document.getElementById('status-indicator');
+        const loadingEl = document.getElementById('loading');
+        
+        let strokes = [];
+        let currentState = 'IDLE'; // IDLE, DRAW, MOVE, SELECT, ERASE
+        
+        // Multi-hand state tracking
+        let handStates = [
+            { currentStroke: null, lastPinchPos: null, movingSpecificStroke: null },
+            { currentStroke: null, lastPinchPos: null, movingSpecificStroke: null }
+        ];
+
+        // Settings
+        let targetHand = 'Right'; // Track right hand by default
+        let brushColor = document.getElementById('color-picker').value;
+        let brushSize = parseInt(document.getElementById('size-slider').value);
+        const SELECTION_RADIUS = 40;
+        const ERASER_RADIUS = 50;
+        const SMOOTHING_FACTOR = 0.5; // Simple low-pass filter for drawing
+
+        // UI Listeners
+        document.getElementById('color-picker').addEventListener('input', (e) => brushColor = e.target.value);
+        document.getElementById('size-slider').addEventListener('input', (e) => {
+            brushSize = parseInt(e.target.value);
+            document.getElementById('size-val').innerText = brushSize;
+        });
+        document.getElementById('hand-selector').addEventListener('change', (e) => targetHand = e.target.value);
+
+        function clearCanvas() { strokes = []; clearSelection(); }
+        function clearSelection() { strokes.forEach(s => s.selected = false); }
+
+        // Resize handling
+        function resizeCanvas() {
+            canvasElement.width = window.innerWidth;
+            canvasElement.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // --- Logic Engine ---
+
+        function updateStatus(state) {
+            if (currentState === state) return;
+            currentState = state;
+            
+            const states = {
+                'IDLE': { text: 'Hovering', bg: '#333', color: 'white' },
+                'DRAW': { text: 'Drawing', bg: '#3b82f6', color: 'white' },
+                'MOVE': { text: 'Moving Object', bg: '#eab308', color: 'black' },
+                'SELECT': { text: 'Selecting', bg: '#22c55e', color: 'white' },
+                'ERASE': { text: 'Erasing', bg: '#ef4444', color: 'white' }
+            };
+
+            statusEl.innerText = states[state].text;
+            statusEl.style.backgroundColor = states[state].bg;
+            statusEl.style.color = states[state].color;
+        }
+
+        // Helper to check if a finger is extended based on distance from wrist
+        function isFingerUp(landmarks, tipIdx, pipIdx) {
+            const wrist = landmarks[0];
+            const tip = landmarks[tipIdx];
+            const pip = landmarks[pipIdx];
+            
+            // Calculate distance from wrist to tip and wrist to PIP joint
+            const distTip = Math.sqrt(Math.pow(tip.x - wrist.x, 2) + Math.pow(tip.y - wrist.y, 2));
+            const distPip = Math.sqrt(Math.pow(pip.x - wrist.x, 2) + Math.pow(pip.y - wrist.y, 2));
+            
+            // If tip is further from wrist than the middle joint, it's extended
+            return distTip > distPip;
+        }
+
+        function processHandGestures(landmarks, handIndex) {
+            let hState = handStates[handIndex];
+
+            // AR Coordinate Mapping: Map MediaPipe points exactly to the object-fit: cover video background
+            const getCoord = (lm) => {
+                if (!videoElement.videoWidth) return { x: 0, y: 0 };
+                const videoRatio = videoElement.videoWidth / videoElement.videoHeight;
+                const windowRatio = window.innerWidth / window.innerHeight;
+                
+                let renderWidth, renderHeight, offsetX = 0, offsetY = 0;
+                
+                if (windowRatio > videoRatio) {
+                    renderWidth = window.innerWidth;
+                    renderHeight = window.innerWidth / videoRatio;
+                    offsetY = (window.innerHeight - renderHeight) / 2;
+                } else {
+                    renderHeight = window.innerHeight;
+                    renderWidth = window.innerHeight * videoRatio;
+                    offsetX = (window.innerWidth - renderWidth) / 2;
+                }
+                
+                let mirroredX = 1 - lm.x;
+                
+                return {
+                    x: offsetX + (mirroredX * renderWidth),
+                    y: offsetY + (lm.y * renderHeight)
+                };
+            };
+
+            const indexTip = getCoord(landmarks[8]);
+            const middleTip = getCoord(landmarks[12]);
+            const ringTip = getCoord(landmarks[16]);
+
+            // Determine fingers up (ignoring thumb for simpler logic)
+            const indexUp = isFingerUp(landmarks, 8, 6);
+            const middleUp = isFingerUp(landmarks, 12, 10);
+            const ringUp = isFingerUp(landmarks, 16, 14);
+            const pinkyUp = isFingerUp(landmarks, 20, 18);
+
+            const fingersUp = [indexUp, middleUp, ringUp, pinkyUp].filter(Boolean).length;
+
+            // Draw current tool overlay
+            drawOverlay(fingersUp, indexTip, middleTip, ringTip);
+
+            // Logic Switcher
+            if (fingersUp === 1 && indexUp) {
+                // --- DRAWING ---
+                if (handIndex === 0) updateStatus('DRAW');
+                hState.movingSpecificStroke = null;
+                
+                if (!hState.currentStroke) {
+                    hState.currentStroke = new Stroke(brushColor, brushSize);
+                    strokes.push(hState.currentStroke);
+                    // Add first point immediately
+                    hState.currentStroke.addPoint(indexTip.x, indexTip.y);
+                } else {
+                    // Smoothing
+                    let lastPt = hState.currentStroke.points[hState.currentStroke.points.length - 1];
+                    let smoothedX = lastPt.x + (indexTip.x - lastPt.x) * SMOOTHING_FACTOR;
+                    let smoothedY = lastPt.y + (indexTip.y - lastPt.y) * SMOOTHING_FACTOR;
+                    
+                    // Only add point if moved enough to prevent huge arrays
+                    if (dist2(lastPt, {x: smoothedX, y: smoothedY}) > 2) {
+                        hState.currentStroke.addPoint(smoothedX, smoothedY);
+                    }
+                }
+                hState.lastPinchPos = null;
+
+            } else if (fingersUp === 2 && indexUp && middleUp) {
+                // --- MOVING ---
+                if (handIndex === 0) updateStatus('MOVE');
+                hState.currentStroke = null;
+                
+                const centroid = {
+                    x: (indexTip.x + middleTip.x) / 2,
+                    y: (indexTip.y + middleTip.y) / 2
+                };
+
+                if (!hState.lastPinchPos) {
+                    // Just started moving. Check if we need to grab an unselected object
+                    let selectedStrokes = strokes.filter(s => s.selected);
+                    if (selectedStrokes.length === 0) {
+                        // Find stroke under cursor
+                        for (let i = strokes.length - 1; i >= 0; i--) {
+                            if (strokes[i].intersectsCircle(centroid.x, centroid.y, 20)) {
+                                hState.movingSpecificStroke = strokes[i];
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    // Calculate delta and move
+                    let dx = centroid.x - hState.lastPinchPos.x;
+                    let dy = centroid.y - hState.lastPinchPos.y;
+
+                    let selectedStrokes = strokes.filter(s => s.selected);
+                    if (selectedStrokes.length > 0) {
+                        // Move selected group
+                        selectedStrokes.forEach(s => s.move(dx, dy));
+                    } else if (hState.movingSpecificStroke) {
+                        // Move specific grabbed object
+                        hState.movingSpecificStroke.move(dx, dy);
+                    }
+                }
+                hState.lastPinchPos = centroid;
+
+            } else if (fingersUp === 3 && indexUp && middleUp && ringUp) {
+                // --- SELECTING ---
+                if (handIndex === 0) updateStatus('SELECT');
+                hState.currentStroke = null;
+                hState.lastPinchPos = null;
+                hState.movingSpecificStroke = null;
+
+                const centroid = {
+                    x: (indexTip.x + middleTip.x + ringTip.x) / 3,
+                    y: (indexTip.y + middleTip.y + ringTip.y) / 3
+                };
+
+                // Select strokes intersecting the selection circle
+                strokes.forEach(stroke => {
+                    if (!stroke.selected && stroke.intersectsCircle(centroid.x, centroid.y, SELECTION_RADIUS)) {
+                        stroke.selected = true;
+                    }
+                });
+
+            } else if (fingersUp >= 4) {
+                // --- ERASING ---
+                if (handIndex === 0) updateStatus('ERASE');
+                hState.currentStroke = null;
+                hState.lastPinchPos = null;
+                hState.movingSpecificStroke = null;
+
+                // Use center of palm roughly as eraser center
+                const center = getCoord(landmarks[9]); 
+
+                // Remove strokes that intersect eraser radius
+                strokes = strokes.filter(stroke => !stroke.intersectsCircle(center.x, center.y, ERASER_RADIUS));
+
+            } else {
+                // --- IDLE ---
+                if (handIndex === 0) updateStatus('IDLE');
+                hState.currentStroke = null;
+                hState.lastPinchPos = null;
+                hState.movingSpecificStroke = null;
+            }
+        }
+
+        // --- Render Engine ---
+
+        function drawOverlay(fingersUp, indexTip, middleTip, ringTip) {
+            canvasCtx.save();
+            
+            if (fingersUp === 1) {
+                // Drawing Cursor
+                canvasCtx.beginPath();
+                canvasCtx.arc(indexTip.x, indexTip.y, brushSize/2, 0, 2*Math.PI);
+                canvasCtx.fillStyle = brushColor;
+                canvasCtx.fill();
+                canvasCtx.strokeStyle = 'white';
+                canvasCtx.lineWidth = 1;
+                canvasCtx.stroke();
+            } 
+            else if (fingersUp === 2) {
+                // Move Cursor
+                let cx = (indexTip.x + middleTip.x) / 2;
+                let cy = (indexTip.y + middleTip.y) / 2;
+                canvasCtx.beginPath();
+                canvasCtx.arc(cx, cy, 10, 0, 2*Math.PI);
+                canvasCtx.fillStyle = 'rgba(234, 179, 8, 0.5)'; // Yellow transparent
+                canvasCtx.fill();
+                canvasCtx.strokeStyle = '#eab308';
+                canvasCtx.stroke();
+            }
+            else if (fingersUp === 3) {
+                // Selection Circle
+                let cx = (indexTip.x + middleTip.x + ringTip.x) / 3;
+                let cy = (indexTip.y + middleTip.y + ringTip.y) / 3;
+                canvasCtx.beginPath();
+                canvasCtx.arc(cx, cy, SELECTION_RADIUS, 0, 2*Math.PI);
+                canvasCtx.fillStyle = 'rgba(34, 197, 94, 0.2)'; // Green transparent
+                canvasCtx.fill();
+                canvasCtx.strokeStyle = '#22c55e';
+                canvasCtx.setLineDash([5, 5]);
+                canvasCtx.stroke();
+            }
+            else if (fingersUp >= 4) {
+                // Eraser Circle
+                let cx = (indexTip.x + middleTip.x + ringTip.x) / 3; // Approx center
+                let cy = (indexTip.y + middleTip.y + ringTip.y) / 3;
+                canvasCtx.beginPath();
+                canvasCtx.arc(cx, cy, ERASER_RADIUS, 0, 2*Math.PI);
+                canvasCtx.fillStyle = 'rgba(239, 68, 68, 0.3)'; // Red transparent
+                canvasCtx.fill();
+                canvasCtx.strokeStyle = '#ef4444';
+                canvasCtx.stroke();
+            }
+
+            canvasCtx.restore();
+        }
+
+        function onResults(results) {
+            // Hide loading screen on first result
+            if (loadingEl.style.display !== 'none') {
+                loadingEl.style.display = 'none';
+            }
+
+            // Clear canvas completely
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            // Draw all saved strokes
+            strokes.forEach(stroke => stroke.draw(canvasCtx));
+
+            // Process Hand gestures if detected
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                let handStatesIndex = 0;
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    // Filter for handedness
+                    // MediaPipe returns 'Left' for a physical right hand if image isn't flipped prior to processing
+                    const mpLabel = results.multiHandedness[i].label;
+                    const physicalHand = mpLabel === 'Left' ? 'Right' : 'Left';
+
+                    if (targetHand !== 'Both' && physicalHand !== targetHand) {
+                        continue; // Skip this hand
+                    }
+
+                    if (handStatesIndex < 2) {
+                        processHandGestures(results.multiHandLandmarks[i], handStatesIndex);
+                        handStatesIndex++;
+                    }
+                }
+                // Reset any untracked hands
+                for (let i = handStatesIndex; i < 2; i++) {
+                    handStates[i].currentStroke = null;
+                    handStates[i].lastPinchPos = null;
+                    handStates[i].movingSpecificStroke = null;
+                }
+            } else {
+                updateStatus('IDLE');
+                handStates.forEach(s => {
+                    s.currentStroke = null;
+                    s.lastPinchPos = null;
+                    s.movingSpecificStroke = null;
+                });
+            }
+        }
+
+        // --- MediaPipe Initialization ---
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+        
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+        
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        
+        camera.start();
+
+    </script>
+</body>
+</html>
