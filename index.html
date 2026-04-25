@@ -116,10 +116,11 @@
         </div>
 
         <div class="text-xs text-gray-400 mt-2 space-y-1 bg-black/30 p-2 rounded">
-            <p>☝️ <b>1 Finger:</b> Draw</p>
-            <p>✌️ <b>2 Fingers:</b> Move Object</p>
-            <p>🤟 <b>3 Fingers:</b> Select Objects</p>
-            <p>🖐️ <b>5 Fingers:</b> Erase</p>
+            <p>☝️ <b>Aim:</b> 1 Finger</p>
+            <p>👇 <b>Draw:</b> Push 1 Finger Forward</p>
+            <p>✌️ <b>Move:</b> 2 Fingers</p>
+            <p>🤟 <b>Select:</b> 3 Fingers</p>
+            <p>🖐️ <b>Erase:</b> 5 Fingers</p>
         </div>
 
         <button class="btn btn-danger mt-2" onclick="clearCanvas()">Clear All</button>
@@ -213,7 +214,7 @@
         const loadingEl = document.getElementById('loading');
         
         let strokes = [];
-        let currentState = 'IDLE'; // IDLE, DRAW, MOVE, SELECT, ERASE
+        let currentState = 'IDLE'; // IDLE, AIM, DRAW, MOVE, SELECT, ERASE
         
         // Multi-hand state tracking
         let handStates = [
@@ -227,7 +228,7 @@
         let brushSize = parseInt(document.getElementById('size-slider').value);
         const SELECTION_RADIUS = 40;
         const ERASER_RADIUS = 50;
-        const SMOOTHING_FACTOR = 0.5; // Simple low-pass filter for drawing
+        const SMOOTHING_FACTOR = 0.6; // Simple low-pass filter for drawing
 
         // UI Listeners
         document.getElementById('color-picker').addEventListener('input', (e) => brushColor = e.target.value);
@@ -255,16 +256,19 @@
             currentState = state;
             
             const states = {
-                'IDLE': { text: 'Hovering', bg: '#333', color: 'white' },
+                'IDLE': { text: 'Scanning Hand...', bg: '#333', color: '#aaa' },
+                'AIM': { text: 'Aiming (Push Forward to Draw)', bg: '#6366f1', color: 'white' },
                 'DRAW': { text: 'Drawing', bg: '#3b82f6', color: 'white' },
                 'MOVE': { text: 'Moving Object', bg: '#eab308', color: 'black' },
                 'SELECT': { text: 'Selecting', bg: '#22c55e', color: 'white' },
                 'ERASE': { text: 'Erasing', bg: '#ef4444', color: 'white' }
             };
 
-            statusEl.innerText = states[state].text;
-            statusEl.style.backgroundColor = states[state].bg;
-            statusEl.style.color = states[state].color;
+            if (states[state]) {
+                statusEl.innerText = states[state].text;
+                statusEl.style.backgroundColor = states[state].bg;
+                statusEl.style.color = states[state].color;
+            }
         }
 
         // Helper to check if a finger is extended based on distance from wrist
@@ -281,34 +285,34 @@
             return distTip > distPip;
         }
 
+        // AR Coordinate Mapping: Map MediaPipe points exactly to the object-fit: cover video background
+        const getCoord = (lm) => {
+            if (!videoElement.videoWidth) return { x: 0, y: 0 };
+            const videoRatio = videoElement.videoWidth / videoElement.videoHeight;
+            const windowRatio = window.innerWidth / window.innerHeight;
+            
+            let renderWidth, renderHeight, offsetX = 0, offsetY = 0;
+            
+            if (windowRatio > videoRatio) {
+                renderWidth = window.innerWidth;
+                renderHeight = window.innerWidth / videoRatio;
+                offsetY = (window.innerHeight - renderHeight) / 2;
+            } else {
+                renderHeight = window.innerHeight;
+                renderWidth = window.innerHeight * videoRatio;
+                offsetX = (window.innerWidth - renderWidth) / 2;
+            }
+            
+            let mirroredX = 1 - lm.x;
+            
+            return {
+                x: offsetX + (mirroredX * renderWidth),
+                y: offsetY + (lm.y * renderHeight)
+            };
+        };
+
         function processHandGestures(landmarks, handIndex) {
             let hState = handStates[handIndex];
-
-            // AR Coordinate Mapping: Map MediaPipe points exactly to the object-fit: cover video background
-            const getCoord = (lm) => {
-                if (!videoElement.videoWidth) return { x: 0, y: 0 };
-                const videoRatio = videoElement.videoWidth / videoElement.videoHeight;
-                const windowRatio = window.innerWidth / window.innerHeight;
-                
-                let renderWidth, renderHeight, offsetX = 0, offsetY = 0;
-                
-                if (windowRatio > videoRatio) {
-                    renderWidth = window.innerWidth;
-                    renderHeight = window.innerWidth / videoRatio;
-                    offsetY = (window.innerHeight - renderHeight) / 2;
-                } else {
-                    renderHeight = window.innerHeight;
-                    renderWidth = window.innerHeight * videoRatio;
-                    offsetX = (window.innerWidth - renderWidth) / 2;
-                }
-                
-                let mirroredX = 1 - lm.x;
-                
-                return {
-                    x: offsetX + (mirroredX * renderWidth),
-                    y: offsetY + (lm.y * renderHeight)
-                };
-            };
 
             const indexTip = getCoord(landmarks[8]);
             const middleTip = getCoord(landmarks[12]);
@@ -322,31 +326,48 @@
 
             const fingersUp = [indexUp, middleUp, ringUp, pinkyUp].filter(Boolean).length;
 
-            // Draw current tool overlay
-            drawOverlay(fingersUp, indexTip, middleTip, ringTip);
+            // --- DEPTH / Z-AXIS CALCULATION ---
+            // Check if index finger is pushed "forward" (closer to camera than the base knuckle)
+            // MediaPipe Z values: negative means closer to the camera.
+            const indexTipZ = landmarks[8].z;
+            const indexMcpZ = landmarks[5].z; 
+            // If the tip is significantly closer to camera than the knuckle, user is pointing forward.
+            const isPointingForward = indexTipZ < (indexMcpZ - 0.025); 
+
+            // Draw current tool overlay AND the hand scan dots so user can aim perfectly
+            drawOverlay(fingersUp, indexTip, middleTip, ringTip, isPointingForward, landmarks);
 
             // Logic Switcher
             if (fingersUp === 1 && indexUp) {
-                // --- DRAWING ---
-                if (handIndex === 0) updateStatus('DRAW');
-                hState.movingSpecificStroke = null;
                 
-                if (!hState.currentStroke) {
-                    hState.currentStroke = new Stroke(brushColor, brushSize);
-                    strokes.push(hState.currentStroke);
-                    // Add first point immediately
-                    hState.currentStroke.addPoint(indexTip.x, indexTip.y);
-                } else {
-                    // Smoothing
-                    let lastPt = hState.currentStroke.points[hState.currentStroke.points.length - 1];
-                    let smoothedX = lastPt.x + (indexTip.x - lastPt.x) * SMOOTHING_FACTOR;
-                    let smoothedY = lastPt.y + (indexTip.y - lastPt.y) * SMOOTHING_FACTOR;
+                if (isPointingForward) {
+                    // --- DRAWING (Finger Pushed Forward) ---
+                    if (handIndex === 0) updateStatus('DRAW');
+                    hState.movingSpecificStroke = null;
                     
-                    // Only add point if moved enough to prevent huge arrays
-                    if (dist2(lastPt, {x: smoothedX, y: smoothedY}) > 2) {
-                        hState.currentStroke.addPoint(smoothedX, smoothedY);
+                    if (!hState.currentStroke) {
+                        hState.currentStroke = new Stroke(brushColor, brushSize);
+                        strokes.push(hState.currentStroke);
+                        // Add first point immediately exactly where cursor is
+                        hState.currentStroke.addPoint(indexTip.x, indexTip.y);
+                    } else {
+                        // Smoothing
+                        let lastPt = hState.currentStroke.points[hState.currentStroke.points.length - 1];
+                        let smoothedX = lastPt.x + (indexTip.x - lastPt.x) * SMOOTHING_FACTOR;
+                        let smoothedY = lastPt.y + (indexTip.y - lastPt.y) * SMOOTHING_FACTOR;
+                        
+                        // Only add point if moved enough to prevent huge arrays
+                        if (dist2(lastPt, {x: smoothedX, y: smoothedY}) > 1) {
+                            hState.currentStroke.addPoint(smoothedX, smoothedY);
+                        }
                     }
+                } else {
+                    // --- AIMING (Finger Pulled Back) ---
+                    // Stops drawing and lets user reposition
+                    if (handIndex === 0) updateStatus('AIM');
+                    hState.currentStroke = null; 
                 }
+                
                 hState.lastPinchPos = null;
 
             } else if (fingersUp === 2 && indexUp && middleUp) {
@@ -430,18 +451,44 @@
 
         // --- Render Engine ---
 
-        function drawOverlay(fingersUp, indexTip, middleTip, ringTip) {
+        function drawOverlay(fingersUp, indexTip, middleTip, ringTip, isPointingForward, landmarks) {
             canvasCtx.save();
             
-            if (fingersUp === 1) {
-                // Drawing Cursor
+            // 1. Draw "Scanning" mesh to show exact tracking of joints
+            canvasCtx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+            landmarks.forEach(lm => {
+                let pt = getCoord(lm);
                 canvasCtx.beginPath();
-                canvasCtx.arc(indexTip.x, indexTip.y, brushSize/2, 0, 2*Math.PI);
-                canvasCtx.fillStyle = brushColor;
+                canvasCtx.arc(pt.x, pt.y, 2, 0, 2*Math.PI);
                 canvasCtx.fill();
-                canvasCtx.strokeStyle = 'white';
-                canvasCtx.lineWidth = 1;
-                canvasCtx.stroke();
+            });
+
+            // 2. Draw active tool overlays
+            if (fingersUp === 1) {
+                if (isPointingForward) {
+                    // Active Drawing Cursor (Solid)
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(indexTip.x, indexTip.y, brushSize/2, 0, 2*Math.PI);
+                    canvasCtx.fillStyle = brushColor;
+                    canvasCtx.fill();
+                    canvasCtx.strokeStyle = 'white';
+                    canvasCtx.lineWidth = 1;
+                    canvasCtx.stroke();
+                } else {
+                    // Aiming Cursor (Hollow / Pulled Back)
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(indexTip.x, indexTip.y, brushSize/2 + 2, 0, 2*Math.PI);
+                    canvasCtx.strokeStyle = brushColor;
+                    canvasCtx.lineWidth = 2;
+                    canvasCtx.setLineDash([3, 3]);
+                    canvasCtx.stroke();
+                    
+                    // Crosshair in center
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(indexTip.x, indexTip.y, 1, 0, 2*Math.PI);
+                    canvasCtx.fillStyle = 'white';
+                    canvasCtx.fill();
+                }
             } 
             else if (fingersUp === 2) {
                 // Move Cursor
